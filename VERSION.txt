@@ -1,0 +1,2 @@
+Jee OS 2.5.2
+Chapter order updated to the user's supplied Physics, Chemistry, and Mathematics arrangements.
