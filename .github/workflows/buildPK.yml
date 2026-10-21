@@ -1,0 +1,136 @@
+name: Build Technical Builder OS APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Locate Capacitor project
+        id: project
+        shell: bash
+        run: |
+          CONFIG="$(find . -type f \
+            -name 'capacitor.config.json' \
+            -not -path '*/node_modules/*' \
+            -not -path '*/.git/*' | head -n 1)"
+
+          if [ -z "$CONFIG" ]; then
+            echo "::error::capacitor.config.json not found."
+            exit 1
+          fi
+
+          APP_DIR="$(dirname "$CONFIG")"
+          echo "dir=$APP_DIR" >> "$GITHUB_OUTPUT"
+          echo "Using project directory: $APP_DIR"
+
+      - name: Install Capacitor
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: |
+          npm install @capacitor/core @capacitor/android @capacitor/cli
+
+      - name: Prepare web assets
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const path = require('path');
+
+          const configPath = 'capacitor.config.json';
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+
+          if (!config.appId) {
+            throw new Error('Add a valid appId to capacitor.config.json');
+          }
+
+          const webDir = config.webDir || 'www';
+
+          if (!fs.existsSync(path.join(webDir, 'index.html'))) {
+            const excluded = new Set([
+              '.git', '.github', 'node_modules', 'android',
+              'ios', 'www', 'dist', 'build', '.gradle'
+            ]);
+
+            const rootFiles = fs.readdirSync('.').filter(name =>
+              !excluded.has(name) &&
+              name !== 'package.json' &&
+              name !== 'package-lock.json' &&
+              !name.startsWith('capacitor.config.')
+            );
+
+            const htmlExists = rootFiles.some(name =>
+              name.toLowerCase() === 'index.html'
+            );
+
+            if (!htmlExists) {
+              throw new Error(
+                'Cannot find index.html in the project root or configured webDir. ' +
+                'Check the Actions log and repository file locations.'
+              );
+            }
+
+            fs.rmSync(webDir, { recursive: true, force: true });
+            fs.mkdirSync(webDir, { recursive: true });
+
+            for (const name of rootFiles) {
+              fs.cpSync(name, path.join(webDir, name), {
+                recursive: true
+              });
+            }
+          }
+
+          config.webDir = webDir;
+          fs.writeFileSync(
+            configPath,
+            JSON.stringify(config, null, 2) + '\n'
+          );
+
+          console.log('Web assets ready in:', webDir);
+          NODE
+
+      - name: Generate Android project if missing
+        working-directory: ${{ steps.project.outputs.dir }}
+        shell: bash
+        run: |
+          if [ ! -f android/gradlew ]; then
+            rm -rf android
+            npx cap add android
+          fi
+
+      - name: Sync Capacitor
+        working-directory: ${{ steps.project.outputs.dir }}
+        run: npx cap sync android
+
+      - name: Build APK
+        working-directory: ${{ steps.project.outputs.dir }}/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Technical-Builder-OS-APK
+          path: ${{ steps.project.outputs.dir }}/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
